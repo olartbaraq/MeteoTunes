@@ -10,6 +10,7 @@ type Config struct {
 	PORT             int32  `mapstructure:"PORT"`
 	OPEN_WEATHER_KEY string `mapstructure:"OPEN_WEATHER_KEY"`
 	LIME_WIRE_KEY    string `mapstructure:"LIME_WIRE_KEY"`
+	GEMINI_API_KEY   string `mapstructure:"GEMINI_API_KEY"`
 }
 
 func LoadConfig(path string) (config *Config, err error) {

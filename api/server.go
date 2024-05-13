@@ -24,19 +24,20 @@ func NewServer(envPath string) *Server {
 	}
 }
 
-func (s *Server) Start() {
+func Routes() http.Handler {
+	server := NewServer(".")
 
 	stack := CreateStack(
 		loggingMiddleware,
 		enableCors,
-		s.ValidateToken,
+		server.ValidateToken,
 	)
 
-	handler := stack((s.router))
+	handler := stack((server.router))
 
-	s.router.HandleFunc("GET /home", homeHandler)
-	s.router.HandleFunc("GET /user/me", userHandler)
-	s.router.HandleFunc("POST /load", s.fetchMusic)
+	server.router.HandleFunc("GET /home", homeHandler)
+	server.router.HandleFunc("GET /user/me", userHandler)
+	server.router.HandleFunc("POST /load", server.fetchMusic)
 
-	http.ListenAndServe(fmt.Sprintf(":%d", s.config.PORT), handler)
+	return handler
 }

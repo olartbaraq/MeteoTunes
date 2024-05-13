@@ -51,6 +51,16 @@ type ImageInfo struct {
 	Height   int32  `json:"height"`
 }
 
+type LlmData struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+}
+
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -167,10 +177,13 @@ func (f *Server) fetchMusic(w http.ResponseWriter, r *http.Request) {
 	// 2) goroutine to talk to limewire api and claude3 apis
 
 	imageInfoChan := make(chan *ImageData, 1)
+	llmChan := make(chan *LlmData, 1)
 
-	wg.Add(1)
+	wg.Add(2)
 	go func(u chan<- *ImageData) {
+
 		location := strings.Split(weatherInfo.Timezone, "/")
+
 		prompt := fmt.Sprintf("It's a beautiful day with temperature %v , humidity %v and pressure %v, with nice %v and sometimes ; nicely of %v in the city %v in %v", weatherInfo.Current.Temperature, weatherInfo.Current.Humidity, weatherInfo.Current.Pressure, weatherInfo.Current.Weather[0].Main, weatherInfo.Current.Weather[0].Description, location[1], location[0])
 		fmt.Println(prompt)
 
@@ -219,7 +232,7 @@ func (f *Server) fetchMusic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		fmt.Println(res)
+		// fmt.Println(res)
 		var imageInfo ImageData
 
 		if err := json.Unmarshal(body, &imageInfo); err != nil {
@@ -237,16 +250,104 @@ func (f *Server) fetchMusic(w http.ResponseWriter, r *http.Request) {
 
 	}(imageInfoChan)
 
+	// 3) feed LLM's prompt to music API
+
+	go func(u chan<- *LlmData) {
+		reqUrl := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=%v", f.config.GEMINI_API_KEY)
+
+		location := strings.Split(weatherInfo.Timezone, "/")
+
+		prompt := fmt.Sprintf("Its a beautiful day with temperature %v , humidity %v and pressure %v, with nice %v and of %v in the city %v in %v. Provide me with a nice song to go with this weather. just the song name and author", weatherInfo.Current.Temperature, weatherInfo.Current.Humidity, weatherInfo.Current.Pressure, weatherInfo.Current.Weather[0].Main, weatherInfo.Current.Weather[0].Description, location[1], location[0])
+
+		fmt.Printf("Called promt from LLM goroutine %v", prompt)
+
+		data := []byte(fmt.Sprintf(`{ "contents": [{"parts":[{"text": "%s"}]}]}`, prompt))
+
+		req, err := http.NewRequest("POST", reqUrl, bytes.NewBuffer(data))
+		if err != nil {
+			w.Header().Add("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{
+				"Error":   err.Error(),
+				"message": "error making request to Gemini API",
+			})
+			return
+		}
+
+		req.Header.Add("Content-Type", "application/json")
+		req.Header.Add("Accept", "application/json")
+
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			w.Header().Add("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			json.NewEncoder(w).Encode(map[string]string{
+				"Error":   err.Error(),
+				"message": "error getting response from Gemini API",
+			})
+			return
+		}
+
+		defer res.Body.Close()
+
+		body, err := io.ReadAll(res.Body)
+
+		if err != nil {
+			w.Header().Add("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"Error":   err.Error(),
+				"message": "error reading gemini response body",
+			})
+			return
+		}
+
+		var llmInfo LlmData
+
+		if err := json.Unmarshal(body, &llmInfo); err != nil {
+			w.Header().Add("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"Error":   err.Error(),
+				"message": "error unmarshalling genimiJSON response",
+			})
+			return
+		}
+
+		u <- &llmInfo
+
+		wg.Done()
+	}(llmChan)
+
+	select {
+
+	case llmInfo := <-llmChan:
+		w.Header().Add("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"message":     "data loaded successfully from gemini",
+			"gemini_data": llmInfo,
+		})
+
+	case <-time.After(20 * time.Second):
+		w.Header().Add("Content-Type", "application/json")
+		w.WriteHeader(http.StatusRequestTimeout)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "timeout fetching image from gemini",
+		})
+		return
+	}
+
 	select {
 	case imageInfo := <-imageInfoChan:
 		w.Header().Add("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{
-			"message": "data loaded successfully from limewire",
-			"data":    imageInfo,
+			"message":       "data loaded successfully from limewire",
+			"limewire_data": imageInfo,
 		})
 
-	case <-time.After(15 * time.Second):
+	case <-time.After(5 * time.Second):
 		w.Header().Add("Content-Type", "application/json")
 		w.WriteHeader(http.StatusRequestTimeout)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -257,6 +358,6 @@ func (f *Server) fetchMusic(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 	close(imageInfoChan)
+	close(llmChan)
 
-	// 3) feed LLM's prompt to music API
 }
